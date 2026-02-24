@@ -299,27 +299,60 @@ if check_password():
 
     # 4. 入庫登録（ここで「在庫0」を許可します）
     elif menu == "📥 入庫登録":
-        st.header("📥 入庫登録")
+        st.header("📥 入庫登録 (スマホ対応スキャン)")
+        
+        # ライブラリを読み込み（入庫画面の時だけ呼び出す）
+        from streamlit_barcode_reader import streamlit_barcode_reader
+        
         comps = pd.read_sql("SELECT id, name FROM companies", get_connection())
         
-        # --- A. 1件ずつ手入力 ---
-        with st.expander("➕ 1件ずつ手入力する"):
-            with st.form("in_f"):
-                name = st.text_input("商品名")
-                qty = st.number_input("数量", min_value=0, value=0)
-                prc = st.number_input("単価", min_value=0, value=0)
-                target_c = st.selectbox("取引先", comps['name']) if not comps.empty else None
-                img = st.file_uploader("画像 (任意)", type=['jpg', 'png', 'jpeg'])
-                if st.form_submit_button("登録"):
-                    if name and target_c:
-                        img_bin = img.read() if img else None
-                        c_id = int(comps[comps['name'] == target_c]['id'].values[0])
-                        with get_connection() as conn:
-                            conn.execute("INSERT INTO stock (item, qty, price, company_id, image) VALUES (?,?,?,?,?)", (name, qty, prc, c_id, img_bin))
-                            conn.commit()
-                        st.success(f"「{name}」を登録しました")
-                    else:
-                        st.error("入力不足です")
+        # --- 新機能：カメラスキャン ---
+        st.subheader("📸 バーコードスキャン")
+        # カメラを起動してバーコードを読み取る
+        barcode_data = streamlit_barcode_reader()
+        
+        if barcode_data:
+            st.success(f"読み取り成功: {barcode_data}")
+            # 読み取ったJANを初期値としてセット
+            jan_input = barcode_data
+        else:
+            jan_input = ""
+
+        st.divider()
+
+        # --- 手入力フォーム（スキャン結果を反映） ---
+        with st.form("in_f"):
+            st.subheader("商品情報入力")
+            name = st.text_input("商品名")
+            jan = st.text_input("JANコード", value=jan_input) # スキャン結果が入る
+            qty = st.number_input("数量", min_value=0, value=1)
+            prc = st.number_input("単価 (最安値チェック対象)", min_value=0, value=0)
+            target_c = st.selectbox("取引先", comps['name']) if not comps.empty else None
+            img = st.file_uploader("商品写真 (任意)", type=['jpg', 'png', 'jpeg'])
+            
+            if st.form_submit_button("登録を実行"):
+                if name and target_c and jan:
+                    c_id = int(comps[comps['name'] == target_c]['id'].values[0])
+                    img_bin = img.read() if img else None
+                    
+                    with get_connection() as conn:
+                        # 既存の同一JANで高い価格のものがあれば削除（最安値維持ロジック）
+                        existing = pd.read_sql("SELECT price FROM stock WHERE jan=?", conn, params=(jan,))
+                        if not existing.empty:
+                            if prc < existing['price'].values[0]:
+                                conn.execute("DELETE FROM stock WHERE jan=?", (jan,))
+                                conn.execute("INSERT INTO stock (jan, item, qty, price, company_id, image) VALUES (?,?,?,?,?,?)",
+                                             (jan, name, qty, prc, c_id, img_bin))
+                                st.success("最安値が更新されました！")
+                            else:
+                                st.warning("既存の価格の方が安いため、登録をスキップしました。")
+                        else:
+                            conn.execute("INSERT INTO stock (jan, item, qty, price, company_id, image) VALUES (?,?,?,?,?,?)",
+                                         (jan, name, qty, prc, c_id, img_bin))
+                            st.success(f"「{name}」を新規登録しました")
+                        conn.commit()
+                else:
+                    st.error("商品名、JAN、取引先は必須です")
 
         # --- B. CSVから一括登録 (ここが新機能！) ---
         # --- CSVから一括登録（最安値自動選択ロジック付き） ---
